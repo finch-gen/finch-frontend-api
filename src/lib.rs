@@ -394,45 +394,52 @@ impl Error for FinchError {
   }
 }
 
+#[derive(Clone, Debug)]
 pub struct FinchOutput {
   pub classes: HashMap<String, FinchClass>,
 }
 
-pub fn get_package_name() -> Result<String, Box<dyn Error>> {
-  if let Ok(name) = std::env::var("CARGO_PKG_NAME") {
-    Ok(name)
+fn get_package_name_from_cargo_toml() -> Result<String, Box<dyn Error>> {
+  let mut cargo_toml_file = File::open("Cargo.toml")?;
+  let mut cargo_toml = String::new();
+  cargo_toml_file.read_to_string(&mut cargo_toml)?;
+  let cargo_toml = cargo_toml.parse::<toml::Value>()?;
+
+  let cargo_table;
+  if let toml::Value::Table(table) = cargo_toml {
+    cargo_table = table;
   } else {
-    let mut cargo_toml_file = File::open("Cargo.toml")?;
-    let mut cargo_toml = String::new();
-    cargo_toml_file.read_to_string(&mut cargo_toml)?;
-    let cargo_toml = cargo_toml.parse::<toml::Value>()?;
-  
-    let cargo_table;
-    if let toml::Value::Table(table) = cargo_toml {
-      cargo_table = table;
-    } else {
-      return Err(Box::new(FinchError("Cargo.toml does not have root table element")));
-    }
-  
-    let package_value = cargo_table.get("package").ok_or(Box::new(FinchError("Cargo.toml does not have [package] table")))?;
-    let package;
-    if let toml::Value::Table(package_table) = package_value {
-      package = package_table;
-    } else {
-      return Err(Box::new(FinchError("Cargo.toml does not have [package] table")));
-    }
-  
-    let name_value = package.get("name").ok_or(Box::new(FinchError("Cargo.toml does not have package name string")))?;
-    if let toml::Value::String(name) = name_value {
-      Ok(name.to_string())
-    } else {
-      Err(Box::new(FinchError("Cargo.toml does not have package name string")))
-    }
+    return Err(Box::new(FinchError("Cargo.toml does not have root table element")));
+  }
+
+  let package_value = cargo_table.get("package").ok_or(Box::new(FinchError("Cargo.toml does not have [package] table")))?;
+  let package;
+  if let toml::Value::Table(package_table) = package_value {
+    package = package_table;
+  } else {
+    return Err(Box::new(FinchError("Cargo.toml does not have [package] table")));
+  }
+
+  let name_value = package.get("name").ok_or(Box::new(FinchError("Cargo.toml does not have package name string")))?;
+  if let toml::Value::String(name) = name_value {
+    Ok(name.to_string())
+  } else {
+    Err(Box::new(FinchError("Cargo.toml does not have package name string")))
   }
 }
 
-pub fn generate() -> Result<FinchOutput, Box<dyn Error>> {
-  let name = get_package_name()?;
+pub fn get_package_name(cli: bool) -> Result<String, Box<dyn Error>> {
+  if cli {
+    get_package_name_from_cargo_toml()
+  } else if let Ok(name) = std::env::var("CARGO_PKG_NAME") {
+    Ok(name)
+  } else {
+    get_package_name_from_cargo_toml()
+  }
+}
+
+pub fn generate(cli: bool) -> Result<FinchOutput, Box<dyn Error>> {
+  let name = get_package_name(cli)?;
   let name_underscore = name.replace("-", "_");
 
   let header_name = format!("{}-finch_bindgen.h", name_underscore);
@@ -440,6 +447,8 @@ pub fn generate() -> Result<FinchOutput, Box<dyn Error>> {
   cbindgen::Builder::new()
     .with_namespaces(&vec!["finch", "bindgen", &name_underscore])
     .with_parse_expand(&vec![name])
+    .with_parse_deps(true)
+    .with_parse_include(&vec!["finch-gen"])
     .with_crate(std::env::current_dir().unwrap())
     .generate()?.write_to_file(&header_name);
 
