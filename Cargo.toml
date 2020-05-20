@@ -1,0 +1,11 @@
+[package]
+name = "finch-frontend-api"
+version = "0.1.0"
+authors = ["Hackzzila <admin@hackzzila.com>"]
+edition = "2018"
+
+[dependencies]
+clang = { version = "0.23.0", features = ["clang_7_0"] }
+cbindgen = "0.14.2"
+toml = "0.5.6"
+log = "0.4.8"
