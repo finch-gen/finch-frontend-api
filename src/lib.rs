@@ -1,4 +1,5 @@
 use std::fs::File;
+use std::path::PathBuf;
 use std::error::Error;
 use std::io::prelude::*;
 use std::collections::HashMap;
@@ -15,26 +16,36 @@ pub struct FinchType {
   pub pointee_type: Option<Box<FinchType>>,
   pub canonical_type: Option<Box<FinchType>>,
   pub sizeof: Option<usize>,
+  pub template_argument_types: Option<Vec<Option<FinchType>>>,
 }
 
-impl<'tu> From<Type<'tu>> for FinchType {
-  fn from(value: Type) -> Self {
+impl<'tu> From<&Type<'tu>> for FinchType {
+  fn from(value: &Type) -> Self {
     Self {
       display_name: value.get_display_name(),
       kind: value.get_kind(),
       pointee_type: match value.get_pointee_type() {
-        Some(ty) =>  Some(Box::new(FinchType::from(ty))),
+        Some(ty) =>  Some(Box::new(FinchType::from(&ty))),
         None => None,
       },
       canonical_type: {
         let canonical_type = value.get_canonical_type();
-        if canonical_type != value {
-          Some(Box::new(FinchType::from(canonical_type)))
+        if &canonical_type != value {
+          Some(Box::new(FinchType::from(&canonical_type)))
         } else {
           None
         }
       },
       sizeof: value.get_sizeof().ok(),
+      template_argument_types: value.get_template_argument_types().map_or(None, |x| {
+        x.iter().map(|x| {
+          if let Some(value) = x {
+            Some(Some(FinchType::from(value)))
+          } else {
+            Some(None)
+          }
+        }).collect()
+      }),
     }
   }
 }
@@ -55,7 +66,7 @@ impl FinchNew {
     let mut arg_types = Vec::new();
     for arg in e.get_arguments().unwrap() {
       arg_names.push(arg.get_display_name().unwrap());
-      arg_types.push(FinchType::from(arg.get_type().unwrap()));
+      arg_types.push(FinchType::from(&arg.get_type().unwrap()));
     }
 
     Self {
@@ -98,7 +109,7 @@ impl FinchMethod {
     args.remove(0);
     for arg in args {
       arg_names.push(arg.get_display_name().unwrap());
-      arg_types.push(FinchType::from(arg.get_type().unwrap()));
+      arg_types.push(FinchType::from(&arg.get_type().unwrap()));
     }
 
     Self {
@@ -106,7 +117,7 @@ impl FinchMethod {
       method_name,
       fn_name,
       c_fn_name,
-      ret_type: FinchType::from(e.get_result_type().unwrap()),
+      ret_type: FinchType::from(&e.get_result_type().unwrap()),
       arg_names,
       arg_types,
       comments: e.get_comment(),
@@ -133,7 +144,7 @@ impl FinchStatic {
     let mut arg_types = Vec::new();
     for arg in e.get_arguments().unwrap() {
       arg_names.push(arg.get_display_name().unwrap());
-      arg_types.push(FinchType::from(arg.get_type().unwrap()));
+      arg_types.push(FinchType::from(&arg.get_type().unwrap()));
     }
 
     Self {
@@ -141,7 +152,7 @@ impl FinchStatic {
       method_name,
       fn_name,
       c_fn_name,
-      ret_type: FinchType::from(e.get_result_type().unwrap()),
+      ret_type: FinchType::from(&e.get_result_type().unwrap()),
       arg_names,
       arg_types,
       comments: e.get_comment(),
@@ -166,7 +177,7 @@ impl FinchGetter {
       field_name,
       fn_name,
       c_fn_name,
-      type_: FinchType::from(e.get_result_type().unwrap()),
+      type_: FinchType::from(&e.get_result_type().unwrap()),
       comments: e.get_comment(),
     }
   }
@@ -189,7 +200,7 @@ impl FinchSetter {
       field_name,
       fn_name,
       c_fn_name,
-      type_: FinchType::from(e.get_arguments().unwrap()[1].get_type().unwrap()),
+      type_: FinchType::from(&e.get_arguments().unwrap()[1].get_type().unwrap()),
       comments: e.get_comment(),
     }
   }
@@ -428,50 +439,83 @@ fn get_package_name_from_cargo_toml() -> Result<String, Box<dyn Error>> {
   }
 }
 
-pub fn get_package_name(cli: bool) -> Result<String, Box<dyn Error>> {
-  if cli {
-    get_package_name_from_cargo_toml()
-  } else if let Ok(name) = std::env::var("CARGO_PKG_NAME") {
-    Ok(name)
+pub fn get_package_name() -> Result<String, Box<dyn Error>> {
+  let cargo_pkg_name = std::env::var("CARGO_PKG_NAME");
+  if let Ok(cargo_pkg_name) = cargo_pkg_name {
+    if cargo_pkg_name != env!("CARGO_PKG_NAME") {
+      Ok(cargo_pkg_name)
+    } else {
+      get_package_name_from_cargo_toml()
+    }
   } else {
     get_package_name_from_cargo_toml()
   }
 }
 
-pub fn generate(cli: bool) -> Result<FinchOutput, Box<dyn Error>> {
-  let name = get_package_name(cli)?;
-  let name_underscore = name.replace("-", "_");
+#[derive(Clone, Debug, Default)]
+pub struct Config {
+  pub out_dir: Option<PathBuf>,
+}
 
-  let header_name = format!("{}-finch_bindgen.h", name_underscore);
+impl Config {
+  pub fn generate(self) -> Result<FinchOutput, Box<dyn Error>> {
+    let name = get_package_name()?;
+    let name_underscore = name.replace("-", "_");
 
-  cbindgen::Builder::new()
-    .with_namespaces(&vec!["finch", "bindgen", &name_underscore])
-    .with_parse_expand(&vec![name])
-    .with_parse_deps(true)
-    .with_parse_include(&vec!["finch-gen"])
-    .with_crate(std::env::current_dir().unwrap())
-    .generate()?.write_to_file(&header_name);
+    let mut header_name = PathBuf::from(format!("{}-finch_bindgen.h", name_underscore));
+    if let Some(out_dir) = self.out_dir {
+      header_name = out_dir.join(header_name);
+    }
+    
+    cbindgen::Builder::new()
+      .with_namespaces(&vec!["finch", "bindgen", &name_underscore])
+      .with_parse_expand(&vec![name])
+      .with_parse_deps(true)
+      .with_parse_include(&vec!["finch-gen"])
+      .with_crate(std::env::current_dir().unwrap())
+      .generate()?.write_to_file(&header_name);
 
-  let clang = Clang::new().unwrap();
+    let clang = Clang::new().unwrap();
 
-  let index = Index::new(&clang, false, false);
-  
-  let args = vec!["-std=c++11"];
-  let tu = index.parser(header_name).arguments(&args).parse().unwrap();
-  let entity = tu.get_entity();
+    let index = Index::new(&clang, false, false);
+    
+    let args = vec!["-std=c++11"];
+    let tu = index.parser(header_name).arguments(&args).parse().unwrap();
+    let entity = tu.get_entity();
 
-  let mut state = ParserState {
-    in_finch: false,
-    in_internal: false,
-    namespace: None,
-    classes: HashMap::new(),
-  };
+    let mut state = ParserState {
+      in_finch: false,
+      in_internal: false,
+      namespace: None,
+      classes: HashMap::new(),
+    };
 
-  process_entity(&mut state, entity);
+    process_entity(&mut state, entity);
 
-  Ok(FinchOutput {
-    classes: state.classes,
-  })
+    Ok(FinchOutput {
+      classes: state.classes,
+    })
+  }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct Builder {
+  config: Config,
+}
+
+impl Builder {
+  pub fn new() -> Self {
+    std::default::Default::default()
+  }
+
+  pub fn with_out_dir<T: Into<PathBuf>>(mut self, out_dir: T) -> Self {
+    self.config.out_dir = Some(out_dir.into());
+    self
+  }
+
+  pub fn generate(self) -> Result<FinchOutput, Box<dyn Error>> {
+    self.config.generate()
+  }
 }
 
 fn uppercase_first(s: &str) -> String {
