@@ -12,6 +12,9 @@ jobs:
     steps:
     - uses: actions/checkout@v2
 
+    - name: Install libclang
+      run: apt-get install -y libclang-dev
+
     - name: Checkout rustdoc-theme
       uses: actions/checkout@v2
       with:
